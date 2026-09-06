@@ -1,0 +1,65 @@
+name: build-freebsd
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Gotify version string (no leading v)'
+        required: false
+        default: '3.1.0'
+      ref:
+        description: 'gotify/server ref to build'
+        required: false
+        default: 'v3.1.0'
+
+jobs:
+  freebsd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout gotify/server
+        uses: actions/checkout@v7
+        with:
+          repository: gotify/server
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Record commit
+        run: echo "COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Build UI
+        run: |
+          npm install -g yarn
+          (cd ui && yarn install && yarn build)
+          ls ui/build | head -5
+
+      - name: Build server in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: '14'
+          envs: 'VERSION COMMIT'
+          prepare: |
+            pkg install -y go zip
+          run: |
+            set -eu
+            BUILD_DATE=$(date "+%F-%T")
+            LD_FLAGS="-w -s -X main.Version=${VERSION} -X main.BuildDate=${BUILD_DATE} -X main.Commit=${COMMIT} -X main.Mode=prod"
+            echo "using $(go version) on $(freebsd-version)"
+            go build -mod=readonly -a -installsuffix cgo -ldflags "$LD_FLAGS" -o build/gotify-freebsd-amd64 .
+            zip -j build/gotify-freebsd-amd64.zip build/gotify-freebsd-amd64
+            file build/gotify-freebsd-amd64
+            ls -lh build/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gotify-freebsd-amd64-${{ inputs.version }}
+          path: build/gotify-freebsd-amd64.zip
+          if-no-files-found: error
