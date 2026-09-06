@@ -26,6 +26,9 @@ on:
         required: false
         default: true
 
+permissions:
+  contents: write
+
 jobs:
   freebsd:
     runs-on: ubuntu-latest
