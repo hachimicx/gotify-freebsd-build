@@ -1,0 +1,66 @@
+name: auto-upstream
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # daily 02:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check upstream latest versions
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          GOTIFY=$(gh api repos/gotify/server/releases/latest --jq .tag_name)
+          RUSTFS=$(gh api 'repos/rustfs/rustfs/releases?per_page=1' --jq '.[0].tag_name')
+          echo "upstream: gotify=${GOTIFY} rustfs=${RUSTFS}"
+          echo "gotify=$GOTIFY" >> "$GITHUB_OUTPUT"
+          echo "rustfs=$RUSTFS" >> "$GITHUB_OUTPUT"
+
+          OLD_G=$(jq -r '.gotify // "none"' state.json)
+          OLD_R=$(jq -r '.rustfs // "none"' state.json)
+          echo "state:     gotify=${OLD_G} rustfs=${OLD_R}"
+
+          [ "$GOTIFY" != "$OLD_G" ] && echo "build_gotify=true" >> "$GITHUB_OUTPUT" || true
+          [ "$RUSTFS" != "$OLD_R" ] && echo "build_rustfs=true" >> "$GITHUB_OUTPUT" || true
+
+      - name: Dispatch gotify build
+        if: steps.ver.outputs.build_gotify == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          G=${{ steps.ver.outputs.gotify }}
+          gh workflow run build-freebsd.yml -f ref="$G" -f version="${G#v}"
+          echo "dispatched gotify build for $G"
+
+      - name: Dispatch rustfs build
+        if: steps.ver.outputs.build_rustfs == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          R=${{ steps.ver.outputs.rustfs }}
+          gh workflow run build-rustfs.yml -f ref="$R" -f version="$R"
+          echo "dispatched rustfs build for $R"
+
+      - name: Update state
+        if: steps.ver.outputs.build_gotify == 'true' || steps.ver.outputs.build_rustfs == 'true'
+        run: |
+          jq --arg g "${{ steps.ver.outputs.gotify }}" --arg r "${{ steps.ver.outputs.rustfs }}" \
+            '.gotify = $g | .rustfs = $r' state.json > state.json.tmp
+          mv state.json.tmp state.json
+          cat state.json
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git commit -m "upstream: gotify=${{ steps.ver.outputs.gotify }} rustfs=${{ steps.ver.outputs.rustfs }}"
+          git push
