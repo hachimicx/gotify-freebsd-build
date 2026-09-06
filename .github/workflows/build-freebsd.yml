@@ -130,3 +130,42 @@ jobs:
           name: telegram-plugin-freebsd-amd64
           path: build/telegram-plugin-freebsd-amd64.so
           if-no-files-found: error
+
+  release:
+    needs: freebsd
+    if: ${{ success() && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: freebsd-v${{ inputs.version }}
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: '*'
+          merge-multiple: true
+
+      - name: Create release
+        run: |
+          ls -lh dist/
+          ASSETS=""
+          [ -f dist/gotify-freebsd-amd64.zip ] && ASSETS="$ASSETS dist/gotify-freebsd-amd64.zip"
+          [ -f dist/telegram-plugin-freebsd-amd64.so ] && ASSETS="$ASSETS dist/telegram-plugin-freebsd-amd64.so"
+          [ -n "$ASSETS" ] || { echo "no assets found"; exit 1; }
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release $TAG exists -> replacing assets"
+            gh release delete-asset "$TAG" gotify-freebsd-amd64.zip --repo "$GITHUB_REPOSITORY" --yes || true
+            gh release delete-asset "$TAG" telegram-plugin-freebsd-amd64.so --repo "$GITHUB_REPOSITORY" --yes || true
+            gh release upload "$TAG" $ASSETS --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" $ASSETS \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "gotify ${{ inputs.version }} (FreeBSD amd64)" \
+              --notes "Unofficial FreeBSD 14.4 (amd64) build of gotify/server v${{ inputs.version }} with gotify2telegram plugin.
+
+          Server: gotify-freebsd-amd64.zip (unzip, chmod +x, run).
+          Plugin: telegram-plugin-freebsd-amd64.so — shared deps aligned to server go.mod, same Go toolchain as the server binary. Configure via GOTIFY_HOST / GOTIFY_CLIENT_TOKEN / TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID env vars."
+          fi
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
