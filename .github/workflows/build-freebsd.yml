@@ -11,6 +11,20 @@ on:
         description: 'gotify/server ref to build'
         required: false
         default: 'v3.1.0'
+      plugin_ref:
+        description: 'gotify2telegram ref to build'
+        required: false
+        default: 'master'
+      build_server:
+        description: 'Build gotify server binary'
+        type: boolean
+        required: false
+        default: true
+      build_plugin:
+        description: 'Build gotify2telegram plugin (.so)'
+        type: boolean
+        required: false
+        default: true
 
 jobs:
   freebsd:
@@ -20,27 +34,52 @@ jobs:
       VERSION: ${{ inputs.version }}
     steps:
       - name: Checkout gotify/server
+        if: inputs.build_server
         uses: actions/checkout@v7
         with:
           repository: gotify/server
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
+      - name: Checkout gotify2telegram plugin
+        if: inputs.build_plugin
+        uses: actions/checkout@v7
+        with:
+          repository: anhbh310/gotify2telegram
+          ref: ${{ inputs.plugin_ref }}
+          path: plugin-src
+          persist-credentials: false
+
       - name: Record commit
+        if: inputs.build_server
         run: echo "COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Setup Node
+        if: inputs.build_server
         uses: actions/setup-node@v7
         with:
           node-version: '24'
 
       - name: Build UI
+        if: inputs.build_server
         run: |
           npm install -g yarn
           (cd ui && yarn install && yarn build)
+          rm -rf ui/node_modules
           ls ui/build | head -5
 
-      - name: Build server in FreeBSD VM
+      - name: Patch plugin
+        if: inputs.build_plugin
+        run: |
+          cd plugin-src
+          # time.Sleep(5) sleeps 5 nanoseconds, not 5 seconds
+          sed -i 's/time\.Sleep(5)/time.Sleep(5 * time.Second)/' plugin.go
+          sed -i 's/time\.Sleep(3)/time.Sleep(3 * time.Second)/' plugin.go
+          # response body leaked on every forwarded message chunk
+          sed -i 's/defer resp\.Body\.Close()/resp.Body.Close()/' plugin.go
+          grep -nE 'time\.Sleep|Body\.Close' plugin.go
+
+      - name: Build in FreeBSD VM
         uses: vmactions/freebsd-vm@v1
         with:
           release: '14'
@@ -49,17 +88,45 @@ jobs:
             pkg install -y go zip
           run: |
             set -eu
-            BUILD_DATE=$(date "+%F-%T")
-            LD_FLAGS="-w -s -X main.Version=${VERSION} -X main.BuildDate=${BUILD_DATE} -X main.Commit=${COMMIT} -X main.Mode=prod"
             echo "using $(go version) on $(freebsd-version)"
-            go build -mod=readonly -a -installsuffix cgo -ldflags "$LD_FLAGS" -o build/gotify-freebsd-amd64 .
-            zip -j build/gotify-freebsd-amd64.zip build/gotify-freebsd-amd64
-            file build/gotify-freebsd-amd64
+            mkdir -p build
+
+            if [ "${{ inputs.build_server }}" = "true" ]; then
+              BUILD_DATE=$(date "+%F-%T")
+              LD_FLAGS="-w -s -X main.Version=${VERSION} -X main.BuildDate=${BUILD_DATE} -X main.Commit=${COMMIT} -X main.Mode=prod"
+              go build -mod=readonly -a -installsuffix cgo -ldflags "$LD_FLAGS" -o build/gotify-freebsd-amd64 .
+              zip -j build/gotify-freebsd-amd64.zip build/gotify-freebsd-amd64
+              file build/gotify-freebsd-amd64
+            fi
+
+            if [ "${{ inputs.build_plugin }}" = "true" ]; then
+              cd plugin-src
+              # align shared deps with the exact gotify version (plugin .so load requirement)
+              fetch -o /tmp/server.mod "https://raw.githubusercontent.com/gotify/server/v${VERSION}/go.mod"
+              WS_VER=$(awk '/gorilla\/websocket/ {print $2; exit}' /tmp/server.mod)
+              PA_VER=$(awk '/gotify\/plugin-api / {print $2; exit}' /tmp/server.mod)
+              echo "aligning: websocket=${WS_VER} plugin-api=${PA_VER}"
+              go mod edit -require=github.com/gorilla/websocket@${WS_VER} -require=github.com/gotify/plugin-api@${PA_VER}
+              go mod tidy
+              go build -mod=readonly -a -installsuffix cgo -buildmode=plugin -ldflags "-w -s" -o ../build/telegram-plugin-freebsd-amd64.so .
+              file ../build/telegram-plugin-freebsd-amd64.so
+              cd ..
+            fi
+
             ls -lh build/
 
-      - name: Upload artifact
+      - name: Upload server artifact
+        if: inputs.build_server
         uses: actions/upload-artifact@v4
         with:
           name: gotify-freebsd-amd64-${{ inputs.version }}
           path: build/gotify-freebsd-amd64.zip
+          if-no-files-found: error
+
+      - name: Upload plugin artifact
+        if: inputs.build_plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-plugin-freebsd-amd64
+          path: build/telegram-plugin-freebsd-amd64.so
           if-no-files-found: error
